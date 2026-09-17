@@ -1672,8 +1672,10 @@ impl DiscWriterWIA {
             if is_rvz { size_of::<RVZGroup>() } else { size_of::<WIAGroup>() } as u32 * group_idx;
 
         header_data.put_slice(partitions.as_bytes());
-        header_data.put_bytes(0, raw_data_size as usize);
-        header_data.put_bytes(0, group_size as usize);
+        // Small metadata tables can grow during compression. Reserve space for
+        // the encoded tables before emitting any disc blocks.
+        header_data.put_bytes(0, compress_bound(options.compression, raw_data_size as usize));
+        header_data.put_bytes(0, compress_bound(options.compression, group_size as usize));
         // Group data alignment
         let rem = header_data.len() % 4;
         if rem != 0 {
@@ -1959,8 +1961,8 @@ fn compress_bound(compression: Compression, size: usize) -> usize {
     match compression {
         Compression::None => size,
         Compression::Bzip2(_) => {
-            // 1.25 * size
-            size.div_ceil(4) + size
+            // libbzip2's worst-case bound, including the stream overhead.
+            size + size.div_ceil(100) + 600
         }
         Compression::Lzma(_) => {
             // 1.1 * size + 64 KiB

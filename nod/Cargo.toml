@@ -22,9 +22,9 @@ default = [
     "compress-zstd-vendored",
     "threading",
 ]
-compress-bzip2 = []
-compress-bzip2-vendored = ["compress-bzip2", "dep:bzip2-sys"]
-compress-bzip2-static = ["compress-bzip2-vendored", "bzip2-sys/static"]
+compress-bzip2 = ["dep:bzip2"]
+compress-bzip2-vendored = ["compress-bzip2"]
+compress-bzip2-static = ["compress-bzip2-vendored"]
 compress-lzma = []
 compress-lzma-vendored = ["compress-lzma", "dep:liblzma-sys"]
 compress-lzma-static = ["compress-lzma-vendored", "liblzma-sys/static"]
@@ -46,7 +46,7 @@ crypto-common = "0.2"
 base16ct = "1.0"
 block-padding = "0.4"
 bytes = "1.11"
-bzip2-sys = { version = "0.1.13", optional = true }
+bzip2 = { version = "0.6.1", optional = true }
 cbc = "0.2.0-rc.3"
 crc32fast = "1.5"
 crossbeam-channel = { version = "0.5", optional = true }

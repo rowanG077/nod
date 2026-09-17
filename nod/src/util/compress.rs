@@ -125,7 +125,7 @@ impl Compressor {
 
 // Decode through EOF even when the destination is exactly full, so trailers,
 // checksums and truncated streams are checked rather than silently accepted.
-#[cfg(feature = "compress-zlib")]
+#[cfg(any(feature = "compress-zlib", feature = "compress-bzip2"))]
 fn decompress_into(mut reader: impl io::Read, out: &mut [u8]) -> io::Result<usize> {
     let mut len = 0;
     while len < out.len() {
@@ -197,174 +197,43 @@ mod zlib_api {
     }
 }
 
-#[cfg(feature = "compress-bzip2-vendored")]
-use bzip2_sys as bzip2_raw;
-
-#[cfg(all(feature = "compress-bzip2", not(feature = "compress-bzip2-vendored")))]
-mod bzip2_raw {
-    use core::ffi::{c_char, c_int, c_uint, c_void};
-
-    pub const BZ_FINISH: c_int = 2;
-
-    pub const BZ_OK: c_int = 0;
-    pub const BZ_RUN_OK: c_int = 1;
-    pub const BZ_FINISH_OK: c_int = 3;
-    pub const BZ_STREAM_END: c_int = 4;
-    pub const BZ_OUTBUFF_FULL: c_int = -8;
-
-    #[repr(C)]
-    pub struct bz_stream {
-        pub next_in: *mut c_char,
-        pub avail_in: c_uint,
-        pub total_in_lo32: c_uint,
-        pub total_in_hi32: c_uint,
-
-        pub next_out: *mut c_char,
-        pub avail_out: c_uint,
-        pub total_out_lo32: c_uint,
-        pub total_out_hi32: c_uint,
-
-        pub state: *mut c_void,
-
-        pub bzalloc: Option<extern "C" fn(*mut c_void, c_int, c_int) -> *mut c_void>,
-        pub bzfree: Option<extern "C" fn(*mut c_void, *mut c_void)>,
-        pub opaque: *mut c_void,
-    }
-
-    macro_rules! abi_compat {
-        ($(pub fn $name:ident($($arg:ident: $t:ty),*) -> $ret:ty,)*) => {
-            #[cfg(all(windows, target_env = "msvc"))]
-            #[link(name = "bz2", kind = "static")]
-            unsafe extern "system" {
-                $(pub fn $name($($arg: $t),*) -> $ret;)*
-            }
-            #[cfg(all(windows, not(target_env = "msvc")))]
-            #[link(name = "bz2")]
-            unsafe extern "system" {
-                $(pub fn $name($($arg: $t),*) -> $ret;)*
-            }
-            #[cfg(not(windows))]
-            #[link(name = "bz2")]
-            unsafe extern "C" {
-                $(pub fn $name($($arg: $t),*) -> $ret;)*
-            }
-        }
-    }
-
-    abi_compat! {
-        pub fn BZ2_bzCompressInit(stream: *mut bz_stream,
-                                  blockSize100k: c_int,
-                                  verbosity: c_int,
-                                  workFactor: c_int) -> c_int,
-        pub fn BZ2_bzCompress(stream: *mut bz_stream, action: c_int) -> c_int,
-        pub fn BZ2_bzCompressEnd(stream: *mut bz_stream) -> c_int,
-        pub fn BZ2_bzDecompressInit(stream: *mut bz_stream,
-                                    verbosity: c_int,
-                                    small: c_int) -> c_int,
-        pub fn BZ2_bzDecompress(stream: *mut bz_stream) -> c_int,
-        pub fn BZ2_bzDecompressEnd(stream: *mut bz_stream) -> c_int,
-    }
-}
-
 #[cfg(feature = "compress-bzip2")]
 mod bzip2_api {
-    use std::{
-        ffi::{c_char, c_int, c_uint},
-        io,
-    };
-
-    use super::bzip2_raw;
-
-    fn total_out(stream: &bzip2_raw::bz_stream) -> usize {
-        (((stream.total_out_hi32 as u64) << 32) | stream.total_out_lo32 as u64) as usize
-    }
-
-    fn map_code(context: &str, code: c_int) -> io::Error {
-        io::Error::new(io::ErrorKind::InvalidData, format!("{context} failed with code {code}"))
-    }
+    use std::io;
 
     pub fn decompress(buf: &[u8], out: &mut [u8]) -> io::Result<usize> {
-        let in_len = c_uint::try_from(buf.len())
-            .map_err(|_| io::Error::other("Input buffer length exceeds bzip2 limits"))?;
-        let out_len = c_uint::try_from(out.len())
-            .map_err(|_| io::Error::other("Output buffer length exceeds bzip2 limits"))?;
-        let mut stream: bzip2_raw::bz_stream = unsafe { std::mem::zeroed() };
-        stream.next_in = buf.as_ptr() as *mut c_char;
-        stream.avail_in = in_len;
-        stream.next_out = out.as_mut_ptr() as *mut c_char;
-        stream.avail_out = out_len;
-
-        let init = unsafe { bzip2_raw::BZ2_bzDecompressInit(&mut stream, 0, 0) };
-        if init != bzip2_raw::BZ_OK {
-            return Err(map_code("bzip2 decompressor init", init));
-        }
-
-        let mut ret = bzip2_raw::BZ_OK;
-        while stream.avail_out > 0 {
-            ret = unsafe { bzip2_raw::BZ2_bzDecompress(&mut stream) };
-            match ret {
-                bzip2_raw::BZ_OK => {
-                    if stream.avail_in == 0 {
-                        break;
-                    }
-                }
-                bzip2_raw::BZ_STREAM_END => break,
-                _ => break,
-            }
-        }
-
-        let _ = unsafe { bzip2_raw::BZ2_bzDecompressEnd(&mut stream) };
-
-        match ret {
-            bzip2_raw::BZ_STREAM_END => Ok(total_out(&stream)),
-            bzip2_raw::BZ_OK if stream.avail_out == 0 => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "bzip2 decompression output buffer too small",
-            )),
-            _ => Err(map_code("bzip2 decompression", ret)),
-        }
+        super::decompress_into(bzip2::bufread::BzDecoder::new(buf), out)
     }
 
     pub fn compress(buf: &[u8], level: u8, out: &mut Vec<u8>) -> io::Result<bool> {
-        let in_len = c_uint::try_from(buf.len())
-            .map_err(|_| io::Error::other("Input buffer length exceeds bzip2 limits"))?;
-        let out_len = c_uint::try_from(out.capacity())
-            .map_err(|_| io::Error::other("Output buffer capacity exceeds bzip2 limits"))?;
-
+        if !(1..=9).contains(&level) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid bzip2 level"));
+        }
+        if out.capacity() == 0 {
+            return Ok(false);
+        }
         out.resize(out.capacity(), 0);
-
-        let mut stream: bzip2_raw::bz_stream = unsafe { std::mem::zeroed() };
-        stream.next_in = buf.as_ptr() as *mut c_char;
-        stream.avail_in = in_len;
-        stream.next_out = out.as_mut_ptr() as *mut c_char;
-        stream.avail_out = out_len;
-
-        let init = unsafe { bzip2_raw::BZ2_bzCompressInit(&mut stream, level as c_int, 0, 30) };
-        if init != bzip2_raw::BZ_OK {
-            return Err(map_code("bzip2 compressor init", init));
-        }
-
-        let mut ret = bzip2_raw::BZ_RUN_OK;
-        while ret == bzip2_raw::BZ_RUN_OK || ret == bzip2_raw::BZ_FINISH_OK {
-            ret = unsafe { bzip2_raw::BZ2_bzCompress(&mut stream, bzip2_raw::BZ_FINISH) };
-        }
-
-        let _ = unsafe { bzip2_raw::BZ2_bzCompressEnd(&mut stream) };
-
-        match ret {
-            bzip2_raw::BZ_STREAM_END => {
-                out.truncate(total_out(&stream));
-                Ok(true)
+        let mut encoder = bzip2::Compress::new(bzip2::Compression::new(level.into()), 30);
+        loop {
+            let before = (encoder.total_in(), encoder.total_out());
+            let status = encoder
+                .compress(
+                    &buf[before.0 as usize..],
+                    &mut out[before.1 as usize..],
+                    bzip2::Action::Finish,
+                )
+                .map_err(io::Error::other)?;
+            if status == bzip2::Status::StreamEnd {
+                out.truncate(encoder.total_out() as usize);
+                return Ok(true);
             }
-            bzip2_raw::BZ_FINISH_OK if stream.avail_out == 0 => {
+            if encoder.total_out() as usize == out.len() {
                 out.clear();
-                Ok(false)
+                return Ok(false);
             }
-            bzip2_raw::BZ_OUTBUFF_FULL => {
-                out.clear();
-                Ok(false)
+            if before == (encoder.total_in(), encoder.total_out()) {
+                return Err(io::Error::other("bzip2 compressor made no progress"));
             }
-            _ => Err(map_code("bzip2 compression", ret)),
         }
     }
 }
@@ -825,6 +694,12 @@ mod tests {
                 Compression::Deflate(6),
                 DecompressionKind::Deflate,
                 include_bytes!("../../tests/fixtures/compression/reference.zlib"),
+            ),
+            #[cfg(feature = "compress-bzip2")]
+            (
+                Compression::Bzip2(6),
+                DecompressionKind::Bzip2,
+                include_bytes!("../../tests/fixtures/compression/reference.bz2"),
             ),
         ]
     }
