@@ -123,90 +123,77 @@ impl Compressor {
     }
 }
 
-#[cfg(feature = "compress-zlib-vendored")]
-use libz_sys as zlib_raw;
+// Decode through EOF even when the destination is exactly full, so trailers,
+// checksums and truncated streams are checked rather than silently accepted.
+#[cfg(feature = "compress-zlib")]
+fn decompress_into(mut reader: impl io::Read, out: &mut [u8]) -> io::Result<usize> {
+    let mut len = 0;
+    while len < out.len() {
+        match reader.read(&mut out[len..]) {
+            Ok(0) => return Ok(len),
+            Ok(n) => len += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    let mut extra = [0];
+    loop {
+        match reader.read(&mut extra) {
+            Ok(0) => return Ok(len),
+            Ok(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Decompression output buffer too small",
+                ));
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+}
 
-#[cfg(all(feature = "compress-zlib", not(feature = "compress-zlib-vendored")))]
-mod zlib_raw {
-    use core::ffi::{c_int, c_ulong};
-
-    #[allow(non_camel_case_types)]
-    pub type uLong = c_ulong;
-    #[allow(non_camel_case_types)]
-    pub type uLongf = c_ulong;
-
-    pub const Z_OK: c_int = 0;
-    pub const Z_BUF_ERROR: c_int = -5;
-
-    #[cfg_attr(not(target_env = "msvc"), link(name = "z"))]
-    #[cfg_attr(target_env = "msvc", link(name = "zlib", kind = "static"))]
-    unsafe extern "C" {
-        pub fn uncompress(
-            dest: *mut u8,
-            destLen: *mut uLongf,
-            source: *const u8,
-            sourceLen: uLong,
-        ) -> c_int;
-
-        pub fn compress2(
-            dest: *mut u8,
-            destLen: *mut uLongf,
-            source: *const u8,
-            sourceLen: uLong,
-            level: c_int,
-        ) -> c_int;
+// A slice-backed writer cannot grow the caller's output buffer. WriteZero means
+// the compressed block did not fit and the disc writer should store it verbatim.
+#[cfg(feature = "compress-zlib")]
+fn compress_into(
+    out: &mut Vec<u8>,
+    encode: impl FnOnce(&mut io::Cursor<&mut [u8]>) -> io::Result<()>,
+) -> io::Result<bool> {
+    out.resize(out.capacity(), 0);
+    let mut writer = io::Cursor::new(out.as_mut_slice());
+    let result = encode(&mut writer);
+    let len = writer.position() as usize;
+    match result {
+        Ok(()) => {
+            out.truncate(len);
+            Ok(true)
+        }
+        Err(e) => {
+            out.clear();
+            if e.kind() == io::ErrorKind::WriteZero { Ok(false) } else { Err(e) }
+        }
     }
 }
 
 #[cfg(feature = "compress-zlib")]
 mod zlib_api {
-    use std::{ffi::c_int, io};
-
-    use super::zlib_raw;
+    use std::io::{self, Write};
 
     pub fn decompress(buf: &[u8], out: &mut [u8]) -> io::Result<usize> {
-        let mut out_len = zlib_raw::uLongf::try_from(out.len())
-            .map_err(|_| io::Error::other("Output buffer length exceeds zlib limits"))?;
-        let in_len = zlib_raw::uLong::try_from(buf.len())
-            .map_err(|_| io::Error::other("Input buffer length exceeds zlib limits"))?;
-        let code =
-            unsafe { zlib_raw::uncompress(out.as_mut_ptr(), &mut out_len, buf.as_ptr(), in_len) };
-        match code {
-            zlib_raw::Z_OK => Ok(out_len as usize),
-            _ => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("zlib decompression failed with code {code}"),
-            )),
-        }
+        super::decompress_into(flate2::bufread::ZlibDecoder::new(buf), out)
     }
 
     pub fn compress(buf: &[u8], level: u8, out: &mut Vec<u8>) -> io::Result<bool> {
-        let in_len = zlib_raw::uLong::try_from(buf.len())
-            .map_err(|_| io::Error::other("Input buffer length exceeds zlib limits"))?;
-        let capacity = zlib_raw::uLongf::try_from(out.capacity())
-            .map_err(|_| io::Error::other("Output buffer capacity exceeds zlib limits"))?;
-        out.resize(out.capacity(), 0);
-        let mut out_len = capacity;
-        let code = unsafe {
-            zlib_raw::compress2(
-                out.as_mut_ptr(),
-                &mut out_len,
-                buf.as_ptr(),
-                in_len,
-                level as c_int,
-            )
-        };
-        match code {
-            zlib_raw::Z_OK => {
-                out.truncate(out_len as usize);
-                Ok(true)
-            }
-            zlib_raw::Z_BUF_ERROR => {
-                out.clear();
-                Ok(false)
-            }
-            _ => Err(io::Error::other(format!("zlib compression failed with code {code}"))),
+        if level > 9 {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid zlib level"));
         }
+        super::compress_into(out, |writer| {
+            let mut encoder =
+                flate2::write::ZlibEncoder::new(writer, flate2::Compression::new(level.into()));
+            encoder.write_all(buf)?;
+            encoder.finish()?;
+            Ok(())
+        })
     }
 }
 
@@ -819,5 +806,101 @@ pub(crate) mod lzma_api {
     pub fn lzma2_props_encode_preset(level: u32) -> io::Result<[u8; 1]> {
         let options = preset_options(level)?;
         Ok(lzma2_props_encode(&options))
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reference_data() -> Vec<u8> {
+        let mut data = b"nod pure Rust compression fixture\n".repeat(1024);
+        data.extend((0..256).flat_map(|_| 0u8..=255));
+        data
+    }
+
+    fn codecs() -> Vec<(Compression, DecompressionKind, &'static [u8])> {
+        vec![
+            #[cfg(feature = "compress-zlib")]
+            (
+                Compression::Deflate(6),
+                DecompressionKind::Deflate,
+                include_bytes!("../../tests/fixtures/compression/reference.zlib"),
+            ),
+        ]
+    }
+
+    #[test]
+    fn native_codec_compatibility() {
+        let expected = reference_data();
+        for (kind, decoder, compressed) in codecs() {
+            for size in [expected.len(), expected.len() + 16] {
+                let mut out = vec![0; size];
+                let len = decoder
+                    .decompress(compressed, &mut out)
+                    .unwrap_or_else(|e| panic!("{kind:?}: {e}"));
+                assert_eq!(&out[..len], expected, "{kind:?}");
+            }
+            assert!(
+                decoder.decompress(compressed, &mut vec![0; expected.len() - 1]).is_err(),
+                "{kind:?}: undersized output"
+            );
+            assert!(
+                decoder
+                    .decompress(&compressed[..compressed.len() - 1], &mut vec![0; expected.len()])
+                    .is_err(),
+                "{kind:?}: truncated input"
+            );
+            assert!(
+                decoder.decompress(b"invalid compressed data", &mut [0; 32]).is_err(),
+                "{kind:?}: invalid input"
+            );
+        }
+    }
+
+    #[test]
+    fn bounded_roundtrips() {
+        // Include multiple Zstd/LZMA2 blocks, empty input and incompressible data.
+        let mut random = vec![0; 32768];
+        let mut state = 0x12345678u32;
+        for byte in &mut random {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            *byte = state as u8;
+        }
+        for (kind, decoder, _) in codecs() {
+            for data in [Vec::new(), vec![42], random.clone(), reference_data().repeat(4)] {
+                let mut compressor = Compressor::new(kind, data.len() * 2 + 1024);
+                let capacity = compressor.buffer.capacity();
+                assert!(
+                    compressor
+                        .compress(&data)
+                        .unwrap_or_else(|e| panic!("{kind:?}, input {}: {e}", data.len())),
+                    "{kind:?}"
+                );
+                assert_eq!(compressor.buffer.capacity(), capacity);
+                let mut out = vec![0; data.len()];
+                let len = decoder
+                    .decompress(&compressor.buffer, &mut out)
+                    .unwrap_or_else(|e| panic!("{kind:?}, {} bytes: {e}", data.len()));
+                assert_eq!(len, data.len(), "{kind:?}");
+                assert_eq!(out, data, "{kind:?}");
+                for capacity in [0, 1, compressor.buffer.len() - 1]
+                    .into_iter()
+                    .filter(|&n| n < compressor.buffer.len())
+                {
+                    let mut tiny = Compressor::new(kind, capacity);
+                    assert!(
+                        !tiny.compress(&data).unwrap_or_else(|e| panic!(
+                            "{kind:?}, input {} capacity {capacity}: {e}",
+                            data.len()
+                        )),
+                        "{kind:?}: capacity {capacity}"
+                    );
+                    assert!(tiny.buffer.is_empty());
+                    assert_eq!(tiny.buffer.capacity(), capacity);
+                }
+            }
+        }
     }
 }
