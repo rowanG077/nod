@@ -126,7 +126,7 @@ impl PreloaderThreads {
         self.req_time_avg.add_sample(stat.req_time);
         self.io_time_avg.add_sample(stat.io_time);
         self.num_samples += 1;
-        if self.num_samples % 100 == 0 {
+        if self.num_samples.is_multiple_of(100) {
             let avg_wait = self.wait_time_avg.get_average();
             let avg_req = self.req_time_avg.get_average();
             let avg_io = self.io_time_avg.get_average();
@@ -674,10 +674,10 @@ pub fn fetch_sector_group<'a>(
     preloader: &Preloader,
 ) -> io::Result<(&'a SectorGroup, bool)> {
     polonius!(|cached| -> io::Result<(&'polonius SectorGroup, bool)> {
-        if let Some(sector_group) = cached {
-            if sector_group.request == request {
-                polonius_return!(Ok((sector_group, false)));
-            }
+        if let Some(sector_group) = cached
+            && sector_group.request == request
+        {
+            polonius_return!(Ok((sector_group, false)));
         }
     });
     let sector_group = preloader.fetch(request, max_groups)?;

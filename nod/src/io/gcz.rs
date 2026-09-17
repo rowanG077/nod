@@ -259,7 +259,7 @@ impl DiscWriterGCZ {
         }
 
         let block_size = options.block_size;
-        if block_size < SECTOR_SIZE as u32 || block_size % SECTOR_SIZE as u32 != 0 {
+        if block_size < SECTOR_SIZE as u32 || !block_size.is_multiple_of(SECTOR_SIZE as u32) {
             return Err(Error::DiscFormat("Invalid block size for GCZ".to_string()));
         }
 

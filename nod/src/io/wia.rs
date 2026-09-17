@@ -295,7 +295,7 @@ impl WIADisc {
                     chunk_size
                 )));
             }
-        } else if chunk_size < 0x200000 || chunk_size % 0x200000 != 0 {
+        } else if chunk_size < 0x200000 || !chunk_size.is_multiple_of(0x200000) {
             return Err(Error::DiscFormat(format!("Invalid WIA chunk size: {:#X}", chunk_size)));
         }
         if self.partition_type_size.get() != size_of::<WIAPartition>() as u32 {
@@ -1208,13 +1208,11 @@ impl BlockProcessor for BlockProcessorWIA {
             rvz_packed_size: 0,
             data_hash: 0,
         };
-        if is_rvz {
-            if let Some(packed_data) = self.try_rvz_pack(group_data.as_ref(), &info) {
-                meta.data_size =
-                    (hash_exception_data.len() as u32).align_up(4) + packed_data.len() as u32;
-                meta.rvz_packed_size = packed_data.len() as u32;
-                group_data = packed_data;
-            }
+        if is_rvz && let Some(packed_data) = self.try_rvz_pack(group_data.as_ref(), &info) {
+            meta.data_size =
+                (hash_exception_data.len() as u32).align_up(4) + packed_data.len() as u32;
+            meta.rvz_packed_size = packed_data.len() as u32;
+            group_data = packed_data;
         }
 
         // Compress group
@@ -1773,7 +1771,7 @@ impl DiscWriter for DiscWriterWIA {
                 digest.send(group.disc_data);
 
                 let group_idx = group.block_idx;
-                if file_position % 4 != 0 {
+                if !file_position.is_multiple_of(4) {
                     return Err(Error::Other("File position not aligned to 4".to_string()));
                 }
                 let data_offset = (file_position / 4) as u32;

@@ -342,10 +342,10 @@ impl DiscReader {
         }
 
         // Read from modified disc header
-        if pos < size_of::<DiscHeader>() as u64 {
-            if let Some(alt_disc_header) = &self.alt_disc_header {
-                return Ok(Bytes::copy_from_slice(&alt_disc_header.as_bytes()[pos as usize..]));
-            }
+        if pos < size_of::<DiscHeader>() as u64
+            && let Some(alt_disc_header) = &self.alt_disc_header
+        {
+            return Ok(Bytes::copy_from_slice(&alt_disc_header.as_bytes()[pos as usize..]));
         }
 
         // Load sector group
@@ -379,10 +379,10 @@ impl BufRead for DiscReader {
         let mut this = self;
         polonius!(|this| -> io::Result<&'polonius [u8]> {
             // Read from modified disc header
-            if pos < size_of::<DiscHeader>() as u64 {
-                if let Some(alt_disc_header) = &this.alt_disc_header {
-                    polonius_return!(Ok(&alt_disc_header.as_bytes()[pos as usize..]));
-                }
+            if pos < size_of::<DiscHeader>() as u64
+                && let Some(alt_disc_header) = &this.alt_disc_header
+            {
+                polonius_return!(Ok(&alt_disc_header.as_bytes()[pos as usize..]));
             }
         });
 
@@ -463,8 +463,8 @@ fn read_partition_info(
             let data_start_offset = entry.offset() + header.data_off();
             let data_size = header.data_size();
             let data_end_offset = data_start_offset + data_size;
-            if data_start_offset % SECTOR_SIZE as u64 != 0
-                || data_end_offset % SECTOR_SIZE as u64 != 0
+            if !data_start_offset.is_multiple_of(SECTOR_SIZE as u64)
+                || !data_end_offset.is_multiple_of(SECTOR_SIZE as u64)
             {
                 return Err(Error::DiscFormat(format!(
                     "Partition {group_idx}:{part_idx} data is not sector aligned",
