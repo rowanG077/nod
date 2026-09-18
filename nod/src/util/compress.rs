@@ -1,4 +1,4 @@
-use std::{ffi::CStr, io};
+use std::io;
 
 use tracing::instrument;
 
@@ -125,7 +125,12 @@ impl Compressor {
 
 // Decode through EOF even when the destination is exactly full, so trailers,
 // checksums and truncated streams are checked rather than silently accepted.
-#[cfg(any(feature = "compress-zlib", feature = "compress-bzip2", feature = "compress-lzma"))]
+#[cfg(any(
+    feature = "compress-zlib",
+    feature = "compress-bzip2",
+    feature = "compress-lzma",
+    feature = "compress-zstd"
+))]
 fn decompress_into(mut reader: impl io::Read, out: &mut [u8]) -> io::Result<usize> {
     let mut len = 0;
     while len < out.len() {
@@ -154,7 +159,7 @@ fn decompress_into(mut reader: impl io::Read, out: &mut [u8]) -> io::Result<usiz
 
 // A slice-backed writer cannot grow the caller's output buffer. WriteZero means
 // the compressed block did not fit and the disc writer should store it verbatim.
-#[cfg(any(feature = "compress-zlib", feature = "compress-lzma"))]
+#[cfg(any(feature = "compress-zlib", feature = "compress-lzma", feature = "compress-zstd"))]
 fn compress_into(
     out: &mut Vec<u8>,
     encode: impl FnOnce(&mut io::Cursor<&mut [u8]>) -> io::Result<()>,
@@ -238,110 +243,48 @@ mod bzip2_api {
     }
 }
 
-#[cfg(feature = "compress-zstd-vendored")]
-use zstd_sys as zstd_raw;
-
-#[cfg(all(feature = "compress-zstd", not(feature = "compress-zstd-vendored")))]
-mod zstd_raw {
-    use core::ffi::{c_char, c_int, c_uint, c_ulonglong, c_void};
-
-    pub const ZSTD_CONTENTSIZE_UNKNOWN: i32 = -1;
-    pub const ZSTD_CONTENTSIZE_ERROR: i32 = -2;
-
-    #[cfg_attr(not(target_env = "msvc"), link(name = "zstd"))]
-    #[cfg_attr(target_env = "msvc", link(name = "zstd", kind = "static"))]
-    unsafe extern "C" {
-        pub fn ZSTD_compress(
-            dst: *mut c_void,
-            dstCapacity: usize,
-            src: *const c_void,
-            srcSize: usize,
-            compressionLevel: c_int,
-        ) -> usize;
-
-        pub fn ZSTD_decompress(
-            dst: *mut c_void,
-            dstCapacity: usize,
-            src: *const c_void,
-            srcSize: usize,
-        ) -> usize;
-
-        pub fn ZSTD_getFrameContentSize(src: *const c_void, srcSize: usize) -> c_ulonglong;
-        pub fn ZSTD_compressBound(srcSize: usize) -> usize;
-        pub fn ZSTD_isError(result: usize) -> c_uint;
-        pub fn ZSTD_getErrorName(result: usize) -> *const c_char;
-    }
-}
-
 #[cfg(feature = "compress-zstd")]
 pub(crate) mod zstd_api {
-    use std::{ffi::c_void, io};
+    use std::io::{self, Write};
 
-    use super::{CStr, zstd_raw};
+    use structured_zstd::{
+        decoding::{ContentChecksum, FrameContentSize, StreamingDecoder, read_frame_content_size},
+        encoding::{CompressionLevel, StreamingEncoder},
+    };
 
-    const ZSTD_ERROR_DST_SIZE_TOO_SMALL: usize = 70usize.wrapping_neg();
-
-    pub fn compress_bound(size: usize) -> usize { unsafe { zstd_raw::ZSTD_compressBound(size) } }
-
-    fn map_error_code(code: usize) -> io::Error {
-        let msg = unsafe { CStr::from_ptr(zstd_raw::ZSTD_getErrorName(code)) }
-            .to_string_lossy()
-            .into_owned();
-        io::Error::other(msg)
+    pub fn compress_bound(size: usize) -> usize {
+        // A frame header, checksum and a three-byte header for each raw block.
+        size.saturating_add(size.div_ceil(128 * 1024).max(1).saturating_mul(3))
+            .saturating_add(18 + 4)
     }
 
     pub fn decompress(buf: &[u8], out: &mut [u8]) -> io::Result<usize> {
-        let code = unsafe {
-            zstd_raw::ZSTD_decompress(
-                out.as_mut_ptr().cast::<c_void>(),
-                out.len(),
-                buf.as_ptr().cast::<c_void>(),
-                buf.len(),
-            )
-        };
-        if unsafe { zstd_raw::ZSTD_isError(code) } != 0 {
-            return Err(map_error_code(code));
-        }
-        Ok(code)
+        let mut decoder = StreamingDecoder::new(buf)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        decoder.decoder_mut().set_content_checksum(ContentChecksum::Verify);
+        super::decompress_into(decoder, out)
     }
 
     pub fn compress(buf: &[u8], level: i8, out: &mut Vec<u8>) -> io::Result<bool> {
-        out.resize(out.capacity(), 0);
-        let code = unsafe {
-            zstd_raw::ZSTD_compress(
-                out.as_mut_ptr().cast::<c_void>(),
-                out.len(),
-                buf.as_ptr().cast::<c_void>(),
-                buf.len(),
-                level as i32,
-            )
-        };
-        if unsafe { zstd_raw::ZSTD_isError(code) } != 0 {
-            // dstSize_tooSmall means compressed data doesn't fit; signal caller to store uncompressed
-            if code == ZSTD_ERROR_DST_SIZE_TOO_SMALL {
-                out.clear();
-                return Ok(false);
-            }
-            return Err(map_error_code(code));
-        }
-        out.truncate(code);
-        Ok(true)
+        super::compress_into(out, |writer| {
+            let mut encoder =
+                StreamingEncoder::new(writer, CompressionLevel::from_level(level.into()));
+            encoder.set_pledged_content_size(buf.len() as u64)?;
+            encoder.write_all(buf)?;
+            encoder.finish()?;
+            Ok(())
+        })
     }
 
     pub fn get_content_size(buf: &[u8]) -> io::Result<Option<usize>> {
-        let size =
-            unsafe { zstd_raw::ZSTD_getFrameContentSize(buf.as_ptr().cast::<c_void>(), buf.len()) };
-        if size == zstd_raw::ZSTD_CONTENTSIZE_UNKNOWN as u64 {
-            return Ok(None);
-        } else if size == zstd_raw::ZSTD_CONTENTSIZE_ERROR as u64 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Invalid Zstandard frame header",
-            ));
+        match read_frame_content_size(buf)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+        {
+            FrameContentSize::Unknown => Ok(None),
+            FrameContentSize::Known(size) => usize::try_from(size).map(Some).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "Zstandard frame size exceeds usize")
+            }),
         }
-        usize::try_from(size)
-            .map(Some)
-            .map_err(|_| io::Error::other("Zstandard frame size exceeds usize"))
     }
 }
 
@@ -467,6 +410,12 @@ mod tests {
                 DecompressionKind::Lzma2(Box::from([22])),
                 include_bytes!("../../tests/fixtures/compression/reference.lzma2"),
             ),
+            #[cfg(feature = "compress-zstd")]
+            (
+                Compression::Zstandard(6),
+                DecompressionKind::Zstandard,
+                include_bytes!("../../tests/fixtures/compression/reference.zst"),
+            ),
         ]
     }
 
@@ -543,6 +492,26 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[cfg(feature = "compress-zstd")]
+    #[test]
+    fn zstd_sizes_and_checksums() {
+        let expected = reference_data();
+        let known = include_bytes!("../../tests/fixtures/compression/reference.zst");
+        let unknown = include_bytes!("../../tests/fixtures/compression/unknown-size.zst");
+        assert_eq!(zstd_api::get_content_size(known).unwrap(), Some(expected.len()));
+        assert_eq!(zstd_api::get_content_size(unknown).unwrap(), None);
+        assert!(zstd_api::get_content_size(&known[..5]).is_err());
+        let mut out = vec![0; expected.len()];
+        assert_eq!(zstd_api::decompress(unknown, &mut out).unwrap(), expected.len());
+        assert_eq!(out, expected);
+        let mut corrupted = known.to_vec();
+        *corrupted.last_mut().unwrap() ^= 1;
+        assert!(zstd_api::decompress(&corrupted, &mut out).is_err());
+        let mut empty = Compressor::new(Compression::Zstandard(3), 64);
+        assert!(empty.compress(&[]).unwrap());
+        assert_eq!(zstd_api::get_content_size(&empty.buffer).unwrap(), Some(0));
     }
 
     #[cfg(feature = "compress-lzma")]

@@ -15,6 +15,7 @@ keywords.workspace = true
 categories = ["command-line-utilities", "parser-implementations"]
 
 [features]
+# Codec backends are pure Rust; vendored/static names remain compatibility aliases.
 default = [
     "compress-bzip2-vendored",
     "compress-lzma-vendored",
@@ -31,8 +32,8 @@ compress-lzma-static = ["compress-lzma-vendored"]
 compress-zlib = ["dep:adler2", "dep:flate2"]
 compress-zlib-vendored = ["compress-zlib"]
 compress-zlib-static = ["compress-zlib-vendored"]
-compress-zstd = []
-compress-zstd-vendored = ["compress-zstd", "dep:zstd-sys"]
+compress-zstd = ["dep:structured-zstd"]
+compress-zstd-vendored = ["compress-zstd"]
 compress-zstd-static = ["compress-zstd-vendored"]
 openssl = ["dep:openssl"]
 openssl-vendored = ["openssl", "openssl/vendored"]
@@ -68,4 +69,4 @@ thiserror = "2.0"
 tracing = { workspace = true }
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 zerocopy = { workspace = true }
-zstd-sys = { version = "2.0", default-features = false, optional = true }
+structured-zstd = { workspace = true, optional = true }
