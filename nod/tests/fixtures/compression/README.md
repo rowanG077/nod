@@ -4,6 +4,9 @@ repeated 1024 times, followed by bytes 0 through 255 repeated 256 times.
 
 - `reference.bz2`: Python `bz2.compress(data, compresslevel=6)` (libbzip2).
 - `reference.zlib`: Python `zlib.compress(data, level=6)`.
+- `reference.lzma`: Python `lzma.compress(data, format=FORMAT_RAW,
+  filters=[{"id": FILTER_LZMA1, "preset": 6}])` (liblzma).
+  The WIA properties are `5d 00 00 80 00`.
 
 The fixtures contain generated test data only. Native tools are not required to
 run the tests.

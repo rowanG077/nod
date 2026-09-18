@@ -125,7 +125,7 @@ impl Compressor {
 
 // Decode through EOF even when the destination is exactly full, so trailers,
 // checksums and truncated streams are checked rather than silently accepted.
-#[cfg(any(feature = "compress-zlib", feature = "compress-bzip2"))]
+#[cfg(any(feature = "compress-zlib", feature = "compress-bzip2", feature = "compress-lzma"))]
 fn decompress_into(mut reader: impl io::Read, out: &mut [u8]) -> io::Result<usize> {
     let mut len = 0;
     while len < out.len() {
@@ -154,7 +154,7 @@ fn decompress_into(mut reader: impl io::Read, out: &mut [u8]) -> io::Result<usiz
 
 // A slice-backed writer cannot grow the caller's output buffer. WriteZero means
 // the compressed block did not fit and the disc writer should store it verbatim.
-#[cfg(feature = "compress-zlib")]
+#[cfg(any(feature = "compress-zlib", feature = "compress-lzma"))]
 fn compress_into(
     out: &mut Vec<u8>,
     encode: impl FnOnce(&mut io::Cursor<&mut [u8]>) -> io::Result<()>,
@@ -451,10 +451,19 @@ pub(crate) mod lzma_api {
     use std::{
         cmp::Ordering,
         ffi::c_void,
-        io::{self, ErrorKind},
+        io::{self, ErrorKind, Write},
     };
 
+    use lzma_rust2::{LzmaOptions, LzmaReader, LzmaWriter};
+
     use super::lzma_raw;
+
+    fn rust_preset_options(level: u32) -> io::Result<LzmaOptions> {
+        if level > 9 {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid LZMA preset"));
+        }
+        Ok(LzmaOptions::with_preset(level))
+    }
 
     fn map_error_code(code: lzma_raw::lzma_ret, context: &str) -> io::Error {
         let reason = match code {
@@ -526,24 +535,6 @@ pub(crate) mod lzma_api {
             Ordering::Less => (2 | (d & 1)) << (d / 2 + 11),
         };
         Ok(options)
-    }
-
-    fn lzma_lclppb_encode(options: &lzma_raw::lzma_options_lzma) -> io::Result<u8> {
-        let byte = (options.pb * 5 + options.lp) * 9 + options.lc;
-        if byte >= (9 * 5 * 5) {
-            return Err(io::Error::new(
-                ErrorKind::InvalidData,
-                format!("Invalid LZMA props byte: {byte}"),
-            ));
-        }
-        Ok(byte as u8)
-    }
-
-    fn lzma_props_encode(options: &lzma_raw::lzma_options_lzma) -> io::Result<[u8; 5]> {
-        let mut props = [0u8; 5];
-        props[0] = lzma_lclppb_encode(options)?;
-        props[1..].copy_from_slice(&options.dict_size.to_le_bytes());
-        Ok(props)
     }
 
     fn get_dist_slot(dist: u32) -> u32 {
@@ -652,7 +643,14 @@ pub(crate) mod lzma_api {
     }
 
     pub fn compress_lzma(level: u8, buf: &[u8], out: &mut Vec<u8>) -> io::Result<bool> {
-        compress_raw(lzma_raw::LZMA_FILTER_LZMA1, level, buf, out)
+        let options = rust_preset_options(level.into())?;
+        super::compress_into(out, |writer| {
+            // WIA stores the properties separately and uses an end marker.
+            let mut encoder = LzmaWriter::new_no_header(writer, &options, true)?;
+            encoder.write_all(buf)?;
+            encoder.finish()?;
+            Ok(())
+        })
     }
 
     pub fn compress_lzma2(level: u8, buf: &[u8], out: &mut Vec<u8>) -> io::Result<bool> {
@@ -660,7 +658,20 @@ pub(crate) mod lzma_api {
     }
 
     pub fn decompress_lzma(props: &[u8], buf: &[u8], out: &mut [u8]) -> io::Result<usize> {
-        decompress_raw(lzma_raw::LZMA_FILTER_LZMA1, props, buf, out)
+        let [prop, a, b, c, d] = *props else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Invalid LZMA properties length",
+            ));
+        };
+        let dict_size = u32::from_le_bytes([a, b, c, d]);
+        let mut input = buf;
+        let decoder = LzmaReader::new_with_props(&mut input, u64::MAX, prop, dict_size, None)?;
+        let len = super::decompress_into(decoder, out)?;
+        if !input.is_empty() {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "Trailing LZMA data"));
+        }
+        Ok(len)
     }
 
     pub fn decompress_lzma2(props: &[u8], buf: &[u8], out: &mut [u8]) -> io::Result<usize> {
@@ -668,8 +679,11 @@ pub(crate) mod lzma_api {
     }
 
     pub fn lzma_props_encode_preset(level: u32) -> io::Result<[u8; 5]> {
-        let options = preset_options(level)?;
-        lzma_props_encode(&options)
+        let options = rust_preset_options(level)?;
+        let mut props = [0; 5];
+        props[0] = options.get_props();
+        props[1..].copy_from_slice(&options.dict_size.to_le_bytes());
+        Ok(props)
     }
 
     pub fn lzma2_props_encode_preset(level: u32) -> io::Result<[u8; 1]> {
@@ -700,6 +714,12 @@ mod tests {
                 Compression::Bzip2(6),
                 DecompressionKind::Bzip2,
                 include_bytes!("../../tests/fixtures/compression/reference.bz2"),
+            ),
+            #[cfg(feature = "compress-lzma")]
+            (
+                Compression::Lzma(6),
+                DecompressionKind::Lzma(Box::from([0x5d, 0, 0, 0x80, 0])),
+                include_bytes!("../../tests/fixtures/compression/reference.lzma"),
             ),
         ]
     }
@@ -776,6 +796,16 @@ mod tests {
                     assert_eq!(tiny.buffer.capacity(), capacity);
                 }
             }
+        }
+    }
+
+    #[cfg(feature = "compress-lzma")]
+    #[test]
+    fn lzma_properties() {
+        assert_eq!(lzma_api::lzma_props_encode_preset(6).unwrap(), [0x5d, 0, 0, 0x80, 0]);
+        assert!(lzma_api::lzma_props_encode_preset(10).is_err());
+        for props in [&[][..], &[0xff][..], &[0xff; 5][..]] {
+            assert!(lzma_api::decompress_lzma(props, &[], &mut []).is_err());
         }
     }
 }
