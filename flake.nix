@@ -42,19 +42,10 @@
               toolchain
               rust-cbindgen
               cmake
-              just
               ninja
-              pkg-config
+              just
               python3
               uv
-            ];
-
-            buildInputs = with pkgs; [
-              bzip2
-              openssl
-              xz
-              zlib
-              zstd
             ];
 
             RUST_SRC_PATH = "${toolchain}/lib/rustlib/src/rust/library";

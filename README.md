@@ -218,6 +218,10 @@ For a full end-to-end example of using the C API, see [SDL3 IOStream Demo](nod-f
 
 The top-level `CMakeLists.txt` builds the Rust library via [Corrosion](https://github.com/corrosion-rs/corrosion) and exports the target `nod::nod`.
 
+Compression libraries no longer need to be installed or linked by CMake. The
+`nod::nod` target and C header are unchanged. `NOD_USE_CMAKE_COMPRESSION` is still
+accepted for compatibility and has no effect; Cargo builds the Rust codecs.
+
 Features can be toggled with CMake options:
 
 - `NOD_COMPRESS_BZIP2` (default `ON`)
