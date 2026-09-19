@@ -35,8 +35,9 @@ compress-zlib-static = ["compress-zlib-vendored"]
 compress-zstd = ["dep:structured-zstd"]
 compress-zstd-vendored = ["compress-zstd"]
 compress-zstd-static = ["compress-zstd-vendored"]
-openssl = ["dep:openssl"]
-openssl-vendored = ["openssl", "openssl/vendored"]
+# Compatibility aliases: cryptography always uses RustCrypto.
+openssl = []
+openssl-vendored = ["openssl"]
 python = ["dep:pyo3", "compress-bzip2-vendored", "compress-lzma-vendored", "compress-zlib-vendored", "compress-zstd-vendored", "threading"]
 threading = ["dep:crossbeam-channel", "dep:crossbeam-utils"]
 
@@ -60,7 +61,6 @@ lzma-rust2 = { version = "0.21", default-features = false, features = ["std", "e
 lru = "0.18"
 md-5 = { workspace = true }
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"], optional = true }
-openssl = { version = "0.10", optional = true }
 polonius-the-crab = "0.5"
 pyo3 = { version = "0.29", features = ["abi3-py310", "extension-module"], optional = true }
 sha1 = { workspace = true }

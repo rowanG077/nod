@@ -10,20 +10,7 @@ use crate::{
 
 /// Hashes a byte slice with SHA-1.
 #[instrument(skip_all)]
-pub fn sha1_hash(buf: &[u8]) -> HashBytes {
-    #[cfg(feature = "openssl")]
-    {
-        // The one-shot openssl::sha::sha1 ends up being much slower
-        let mut hasher = openssl::sha::Sha1::new();
-        hasher.update(buf);
-        hasher.finish()
-    }
-    #[cfg(not(feature = "openssl"))]
-    {
-        use sha1::Digest;
-        HashBytes::from(sha1::Sha1::digest(buf))
-    }
-}
+pub fn sha1_hash(buf: &[u8]) -> HashBytes { HashBytes::from(sha1::Sha1::digest(buf)) }
 
 /// Hashes a byte slice with XXH64.
 #[allow(unused_braces)] // https://github.com/rust-lang/rust/issues/116347
@@ -67,15 +54,9 @@ mod multi_threaded {
                 threads.push(digest_thread::<crc32fast::Hasher>());
             }
             if options.digest_md5 {
-                #[cfg(feature = "openssl")]
-                threads.push(digest_thread::<openssl_util::HasherMD5>());
-                #[cfg(not(feature = "openssl"))]
                 threads.push(digest_thread::<md5::Md5>());
             }
             if options.digest_sha1 {
-                #[cfg(feature = "openssl")]
-                threads.push(digest_thread::<openssl_util::HasherSHA1>());
-                #[cfg(not(feature = "openssl"))]
                 threads.push(digest_thread::<sha1::Sha1>());
             }
             if options.digest_xxh64 {
@@ -135,15 +116,9 @@ mod single_threaded {
                 hashers.push(RefCell::new(Box::new(crc32fast::Hasher::new())));
             }
             if options.digest_md5 {
-                #[cfg(feature = "openssl")]
-                hashers.push(RefCell::new(Box::new(openssl_util::HasherMD5::new())));
-                #[cfg(not(feature = "openssl"))]
                 hashers.push(RefCell::new(Box::new(md5::Md5::new())));
             }
             if options.digest_sha1 {
-                #[cfg(feature = "openssl")]
-                hashers.push(RefCell::new(Box::new(openssl_util::HasherSHA1::new())));
-                #[cfg(not(feature = "openssl"))]
                 hashers.push(RefCell::new(Box::new(sha1::Sha1::new())));
             }
             if options.digest_xxh64 {
@@ -260,82 +235,6 @@ impl Hasher for xxhash_rust::xxh64::Xxh64 {
     #[allow(unused_braces)] // https://github.com/rust-lang/rust/issues/116347
     #[instrument(name = "xxhash_rust::xxh64::Xxh64::update", skip_all)]
     fn update(&mut self, data: &[u8]) { xxhash_rust::xxh64::Xxh64::update(self, data) }
-}
-
-#[cfg(feature = "openssl")]
-mod openssl_util {
-    use tracing::instrument;
-
-    use super::{DigestResult, Hasher};
-
-    pub type HasherMD5 = HashWrapper<MessageDigestMD5>;
-    pub type HasherSHA1 = HashWrapper<MessageDigestSHA1>;
-
-    pub struct HashWrapper<T>
-    where T: MessageDigest
-    {
-        hasher: openssl::hash::Hasher,
-        _marker: std::marker::PhantomData<T>,
-    }
-
-    impl<T> HashWrapper<T>
-    where T: MessageDigest
-    {
-        pub(super) fn new() -> Self {
-            Self {
-                hasher: openssl::hash::Hasher::new(T::new()).unwrap(),
-                _marker: Default::default(),
-            }
-        }
-    }
-
-    pub trait MessageDigest {
-        fn new() -> openssl::hash::MessageDigest;
-    }
-
-    pub struct MessageDigestMD5;
-
-    impl MessageDigest for MessageDigestMD5 {
-        fn new() -> openssl::hash::MessageDigest { openssl::hash::MessageDigest::md5() }
-    }
-
-    pub struct MessageDigestSHA1;
-
-    impl MessageDigest for MessageDigestSHA1 {
-        fn new() -> openssl::hash::MessageDigest { openssl::hash::MessageDigest::sha1() }
-    }
-
-    impl Hasher for HasherMD5 {
-        #[cfg(feature = "threading")]
-        const NAME: &'static str = "MD5";
-
-        #[cfg(feature = "threading")]
-        fn new() -> Self { Self::new() }
-
-        fn finalize(&mut self) -> DigestResult {
-            DigestResult::Md5((*self.hasher.finish().unwrap()).try_into().unwrap())
-        }
-
-        #[allow(unused_braces)] // https://github.com/rust-lang/rust/issues/116347
-        #[instrument(name = "openssl_util::HasherMD5::update", skip_all)]
-        fn update(&mut self, data: &[u8]) { self.hasher.update(data).unwrap() }
-    }
-
-    impl Hasher for HasherSHA1 {
-        #[cfg(feature = "threading")]
-        const NAME: &'static str = "SHA-1";
-
-        #[cfg(feature = "threading")]
-        fn new() -> Self { Self::new() }
-
-        fn finalize(&mut self) -> DigestResult {
-            DigestResult::Sha1((*self.hasher.finish().unwrap()).try_into().unwrap())
-        }
-
-        #[allow(unused_braces)] // https://github.com/rust-lang/rust/issues/116347
-        #[instrument(name = "openssl_util::HasherSHA1::update", skip_all)]
-        fn update(&mut self, data: &[u8]) { self.hasher.update(data).unwrap() }
-    }
 }
 
 pub struct DigestResults {
