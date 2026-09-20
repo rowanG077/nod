@@ -96,18 +96,18 @@ pub fn read_block(reader: &mut DiscReader, block_size: usize) -> io::Result<(Byt
 }
 
 /// Process blocks in parallel, ensuring that they are written in order.
-#[cfg_attr(not(feature = "threading"), inline)]
+#[cfg_attr(not(all(feature = "threading", not(target_family = "wasm"))), inline)]
 pub(crate) fn par_process<P, T>(
     mut processor: P,
     block_count: u32,
-    #[cfg(feature = "threading")] num_threads: usize,
+    #[cfg(all(feature = "threading", not(target_family = "wasm")))] num_threads: usize,
     mut callback: impl FnMut(BlockResult<T>) -> Result<()>,
 ) -> Result<()>
 where
     T: Send,
     P: BlockProcessor<BlockMeta = T>,
 {
-    #[cfg(feature = "threading")]
+    #[cfg(all(feature = "threading", not(target_family = "wasm")))]
     if num_threads > 0 {
         return std::thread::scope(|s| {
             use std::collections::VecDeque;

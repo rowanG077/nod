@@ -31,6 +31,7 @@
               "rustc"
             ])
             # rustfmt.toml uses nightly-only options, as does the formatting CI job.
+            fenix.targets.wasm32-unknown-unknown.stable.rust-std
             fenix.complete.rustfmt
           ];
         in

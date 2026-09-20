@@ -17,7 +17,7 @@ pub fn sha1_hash(buf: &[u8]) -> HashBytes { HashBytes::from(sha1::Sha1::digest(b
 #[instrument(skip_all)]
 pub fn xxh64_hash(buf: &[u8]) -> u64 { xxhash_rust::xxh64::xxh64(buf, 0) }
 
-#[cfg(feature = "threading")]
+#[cfg(all(feature = "threading", not(target_family = "wasm")))]
 mod multi_threaded {
     use std::{thread, thread::JoinHandle};
 
@@ -99,7 +99,7 @@ mod multi_threaded {
     }
 }
 
-#[cfg(not(feature = "threading"))]
+#[cfg(not(all(feature = "threading", not(target_family = "wasm"))))]
 mod single_threaded {
     use std::cell::RefCell;
 
@@ -150,9 +150,9 @@ mod single_threaded {
     }
 }
 
-#[cfg(feature = "threading")]
+#[cfg(all(feature = "threading", not(target_family = "wasm")))]
 pub use multi_threaded::DigestManager;
-#[cfg(not(feature = "threading"))]
+#[cfg(not(all(feature = "threading", not(target_family = "wasm"))))]
 pub use single_threaded::DigestManager;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -164,20 +164,20 @@ pub enum DigestResult {
 }
 
 pub trait Hasher {
-    #[cfg(feature = "threading")]
+    #[cfg(all(feature = "threading", not(target_family = "wasm")))]
     const NAME: &'static str;
 
-    #[cfg(feature = "threading")]
+    #[cfg(all(feature = "threading", not(target_family = "wasm")))]
     fn new() -> Self;
     fn finalize(&mut self) -> DigestResult;
     fn update(&mut self, data: &[u8]);
 }
 
 impl Hasher for md5::Md5 {
-    #[cfg(feature = "threading")]
+    #[cfg(all(feature = "threading", not(target_family = "wasm")))]
     const NAME: &'static str = "MD5";
 
-    #[cfg(feature = "threading")]
+    #[cfg(all(feature = "threading", not(target_family = "wasm")))]
     fn new() -> Self { Digest::new() }
 
     fn finalize(&mut self) -> DigestResult {
@@ -190,10 +190,10 @@ impl Hasher for md5::Md5 {
 }
 
 impl Hasher for sha1::Sha1 {
-    #[cfg(feature = "threading")]
+    #[cfg(all(feature = "threading", not(target_family = "wasm")))]
     const NAME: &'static str = "SHA-1";
 
-    #[cfg(feature = "threading")]
+    #[cfg(all(feature = "threading", not(target_family = "wasm")))]
     fn new() -> Self { Digest::new() }
 
     fn finalize(&mut self) -> DigestResult {
@@ -206,10 +206,10 @@ impl Hasher for sha1::Sha1 {
 }
 
 impl Hasher for crc32fast::Hasher {
-    #[cfg(feature = "threading")]
+    #[cfg(all(feature = "threading", not(target_family = "wasm")))]
     const NAME: &'static str = "CRC32";
 
-    #[cfg(feature = "threading")]
+    #[cfg(all(feature = "threading", not(target_family = "wasm")))]
     fn new() -> Self { crc32fast::Hasher::new() }
 
     fn finalize(&mut self) -> DigestResult {
@@ -222,10 +222,10 @@ impl Hasher for crc32fast::Hasher {
 }
 
 impl Hasher for xxhash_rust::xxh64::Xxh64 {
-    #[cfg(feature = "threading")]
+    #[cfg(all(feature = "threading", not(target_family = "wasm")))]
     const NAME: &'static str = "XXH64";
 
-    #[cfg(feature = "threading")]
+    #[cfg(all(feature = "threading", not(target_family = "wasm")))]
     fn new() -> Self { xxhash_rust::xxh64::Xxh64::new(0) }
 
     fn finalize(&mut self) -> DigestResult {

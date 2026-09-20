@@ -5,7 +5,6 @@ use std::{
     io::{Seek, SeekFrom},
     mem::size_of,
     sync::Arc,
-    time::Instant,
 };
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -898,9 +897,13 @@ impl BlockReader for BlockReaderWIA {
 
         let group_data_start = group.data_offset.get() as u64 * 4;
         let mut group_data = BytesMut::zeroed(group.data_size() as usize);
-        let io_start = Instant::now();
+        #[cfg(not(target_family = "wasm"))]
+        let io_start = std::time::Instant::now();
         self.inner.read_exact_at(group_data.as_mut(), group_data_start)?;
-        let io_duration = io_start.elapsed();
+        #[cfg(not(target_family = "wasm"))]
+        let io_duration = Some(io_start.elapsed());
+        #[cfg(target_family = "wasm")]
+        let io_duration = None;
         let mut group_data = group_data.freeze();
 
         let chunk_size = self.disc.chunk_size.get();
@@ -977,7 +980,7 @@ impl BlockReader for BlockReaderWIA {
         } else {
             Block::sectors(info.sector, info.num_sectors, BlockKind::Raw)
         };
-        block.io_duration = Some(io_duration);
+        block.io_duration = io_duration;
         Ok(block)
     }
 
@@ -1765,7 +1768,7 @@ impl DiscWriter for DiscWriterWIA {
                 junk_info: self.junk_info.clone(),
             },
             self.group_count,
-            #[cfg(feature = "threading")]
+            #[cfg(all(feature = "threading", not(target_family = "wasm")))]
             options.processor_threads,
             |group| -> Result<()> {
                 // Update hashers

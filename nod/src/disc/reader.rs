@@ -152,7 +152,7 @@ impl DiscReader {
         let size = io.meta().disc_size.unwrap_or_else(|| guess_disc_size(partitions));
         let preloader = Preloader::new(
             SectorGroupLoader::new(io.clone(), disc_header_arc, partitions.clone()),
-            #[cfg(feature = "threading")]
+            #[cfg(all(feature = "threading", not(target_family = "wasm")))]
             options.preloader_threads,
         );
         Ok(Self {
